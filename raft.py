@@ -145,6 +145,7 @@ class RaftNode:
         self.node_ids = None  # The set of node IDs
 
         self.state = "nascent"  # One of nascent, follower, candidate, or leader
+        self.current_term = 0  # Our current Raft term
 
         self.state_machine = KVStore()
         self.net = Net()
@@ -161,19 +162,27 @@ class RaftNode:
             self.election_timeout * (random.random() + 1)
         )
 
+    def advance_term(self, term):
+        """Advance our term to `term`, resetting who we voted for."""
+        if not self.current_term < term:
+            raise RuntimeError("Can't go backwards")
+
+        self.current_term = term
+
     # Role transitions
 
     def become_follower(self):
         """Become a follower"""
         self.state = "follower"
         self.reset_election_deadline()
-        log("Became follower")
+        log("Became follower for term", self.current_term)
 
     def become_candidate(self):
         """Become a candidate"""
         self.state = "candidate"
+        self.advance_term(self.current_term + 1)
         self.reset_election_deadline()
-        log("Became candidate")
+        log("Became candidate for term", self.current_term)
 
     # Actions for followers/candidates
 
