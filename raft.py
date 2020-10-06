@@ -28,8 +28,12 @@ class Net:
 
     def __init__(self):
         """Constructs a new network client."""
+        self.node_id = None
         self.handlers = {}  # A map of message types to handler functions
         self.callbacks = {}  # A map of message IDs to response handlers
+
+    def set_node_id(self, id):
+        self.node_id = id
 
     def on(self, msg_type, handler):
         """Register a callback for a message of the given type."""
@@ -37,6 +41,22 @@ class Net:
             raise RuntimeError("already have a handler for message type " + type)
 
         self.handlers[msg_type] = handler
+
+    def send_msg(self, msg):
+        """Sends a raw message object"""
+        log("Sent\n" + pformat(msg))
+        json.dump(msg, sys.stdout)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    def send(self, dest, body):
+        """Sends a message to the given destination node with the given body."""
+        self.send_msg({"src": self.node_id, "dest": dest, "body": body})
+
+    def reply(self, req, body):
+        """Replies to a given request message with a response body."""
+        body["in_reply_to"] = req["body"]["msg_id"]
+        self.send(req["src"], body)
 
     def process_msg(self):
         """Handles a message from stdin, if one is currently available."""
@@ -77,6 +97,11 @@ class RaftNode:
 
         self.net = Net()
 
+    def set_node_id(self, id):
+        """Assign our node ID."""
+        self.node_id = id
+        self.net.set_node_id(id)
+
     def main(self):
         """Entry point"""
         log("Online.")
@@ -84,9 +109,10 @@ class RaftNode:
         # Handle initialization message
         def raft_init(msg):
             body = msg["body"]
-            self.node_id = body["node_id"]
+            self.set_node_id(body["node_id"])
             self.node_ids = body["node_ids"]
             log("I am:", self.node_id)
+            self.net.reply(msg, {"type": "raft_init_ok"})
 
         self.net.on("raft_init", raft_init)
 
