@@ -8,6 +8,7 @@ import datetime
 import select
 import time
 import traceback
+import random
 
 # Utilities
 
@@ -21,6 +22,7 @@ def log(*args):
         if i < (len(args) - 1):
             sys.stderr.write(" ")
     sys.stderr.write("\n")
+    sys.stderr.flush()
 
 
 class Net:
@@ -60,6 +62,9 @@ class Net:
 
     def process_msg(self):
         """Handles a message from stdin, if one is currently available."""
+
+        # If we don't have any stdin, we'll return None, and if we do get
+        # a message and process it, we'll return True.
         if sys.stdin not in select.select([sys.stdin], [], [], 0)[0]:
             return None
 
@@ -84,6 +89,7 @@ class Net:
 
         else:
             raise RuntimeError("No callback or handler for\n" + pformat(msg))
+
         handler(msg)
         return True
 
@@ -131,6 +137,10 @@ class KVStore:
 
 class RaftNode:
     def __init__(self):
+        # Heartbeats & timeouts
+        self.election_timeout = 2  # Time before election, in seconds
+        self.election_deadline = 0  # Next election, in epoch seconds
+
         self.node_id = None  # Our node ID
         self.node_ids = None  # The set of node IDs
 
@@ -145,6 +155,39 @@ class RaftNode:
         self.node_id = id
         self.net.set_node_id(id)
 
+    def reset_election_deadline(self):
+        """Don't start an election for a little while."""
+        self.election_deadline = time.time() + (
+            self.election_timeout * (random.random() + 1)
+        )
+
+    # Role transitions
+
+    def become_follower(self):
+        """Become a follower"""
+        self.state = "follower"
+        self.reset_election_deadline()
+        log("Became follower")
+
+    def become_candidate(self):
+        """Become a candidate"""
+        self.state = "candidate"
+        self.reset_election_deadline()
+        log("Became candidate")
+
+    # Actions for followers/candidates
+
+    def election(self):
+        """If it's been long enough, trigger a leader election."""
+        if self.election_deadline < time.time():
+            if self.state == "follower" or self.state == "candidate":
+                # Let's go!
+                self.become_candidate()
+            else:
+                # We're a leader, or initializing; sleep again
+                self.reset_election_deadline()
+            return True
+
     # Message handlers
 
     def setup_handlers(self):
@@ -152,9 +195,15 @@ class RaftNode:
 
         # Handle initialization message
         def raft_init(msg):
+            if self.state != "nascent":
+                raise RuntimeError("Can't init twice!")
+
             body = msg["body"]
             self.set_node_id(body["node_id"])
             self.node_ids = body["node_ids"]
+
+            self.become_follower()
+
             log("I am:", self.node_id)
             self.net.reply(msg, {"type": "raft_init_ok"})
 
@@ -177,7 +226,7 @@ class RaftNode:
 
         while True:
             try:
-                self.net.process_msg() or time.sleep(0.001)
+                self.net.process_msg() or self.election() or time.sleep(0.001)
             except KeyboardInterrupt:
                 log("Aborted by interrupt!")
                 break

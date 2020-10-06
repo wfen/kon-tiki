@@ -17,7 +17,7 @@ store/latest
 store/maelstrom/*
 
 # PyCharm/GoLand content
-.idea
+.idea/*
 
 # Virtual Env
-venv
+venv/*
