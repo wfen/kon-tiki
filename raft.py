@@ -94,6 +94,35 @@ class Net:
         return True
 
 
+class Log:
+    """Stores Raft entries, which are dicts with a :term field."""
+
+    def __init__(self):
+        """Construct a new Log"""
+        # Note that we provide a default entry here, which simplifies
+        # some default cases involving empty logs.
+        self.entries = [{"term": 0, "op": None}]
+
+    def get(self, i):
+        """Return a log entry by index. Note that Raft's log is 1-indexed."""
+        return self.entries[i - 1]
+
+    def append(self, entries):
+        """Appends multiple entries to the log."""
+        self.entries.extend(entries)
+        log("Log:\n" + pformat(self.entries))
+
+
+def last(self):
+    """Returns the most recent entry"""
+    return self.entries[-1]
+
+
+def size(self):
+    "How many entries are in the log?"
+    return len(self.entries)
+
+
 class KVStore:
     def __init__(self):
         self.state = {}
@@ -141,14 +170,18 @@ class RaftNode:
         self.election_timeout = 2  # Time before election, in seconds
         self.election_deadline = 0  # Next election, in epoch seconds
 
+        # Node & cluster IDS
         self.node_id = None  # Our node ID
         self.node_ids = None  # The set of node IDs
 
+        # Raft state
         self.state = "nascent"  # One of nascent, follower, candidate, or leader
         self.current_term = 0  # Our current Raft term
 
-        self.state_machine = KVStore()
+        # Components
         self.net = Net()
+        self.log = Log()
+        self.state_machine = KVStore()
         self.setup_handlers()
 
     def set_node_id(self, id):
