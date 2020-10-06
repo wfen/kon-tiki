@@ -5,7 +5,9 @@ import sys
 import json
 from pprint import pformat
 import datetime
+import select
 import time
+import traceback
 
 # Utilities
 
@@ -26,16 +28,44 @@ class Net:
 
     def __init__(self):
         """Constructs a new network client."""
-        pass
+        self.handlers = {}  # A map of message types to handler functions
+        self.callbacks = {}  # A map of message IDs to response handlers
+
+    def on(self, msg_type, handler):
+        """Register a callback for a message of the given type."""
+        if msg_type in self.handlers:
+            raise RuntimeError("already have a handler for message type " + type)
+
+        self.handlers[msg_type] = handler
 
     def process_msg(self):
         """Handles a message from stdin, if one is currently available."""
+        if sys.stdin not in select.select([sys.stdin], [], [], 0)[0]:
+            return None
+
         line = sys.stdin.readline()
         if not line:
             return None
 
         msg = json.loads(line)
-        return msg
+        log("Received\n" + pformat(msg))
+        body = msg["body"]
+
+        handler = None
+        # Look up reply handler
+        if "in_reply_to" in body:
+            m = body["in_reply_to"]
+            handler = self.callbacks[m]
+            del self.callbacks[m]
+
+        # Fall back based on message type
+        elif body["type"] in self.handlers:
+            handler = self.handlers[body["type"]]
+
+        else:
+            raise RuntimeError("No callback or handler for\n" + pformat(msg))
+        handler(msg)
+        return True
 
 
 class RaftNode:
@@ -52,14 +82,22 @@ class RaftNode:
         log("Online.")
 
         # Handle initialization message
-        msg = self.net.process_msg()
-        body = msg["body"]
-        if body["type"] != "raft_init":
-            raise RuntimeError("Unexpected message " + pformat(msg))
+        def raft_init(msg):
+            body = msg["body"]
+            self.node_id = body["node_id"]
+            self.node_ids = body["node_ids"]
+            log("I am:", self.node_id)
 
-        self.node_id = body["node_id"]
-        self.node_ids = body["node_ids"]
-        log("I am:", self.node_id)
+        self.net.on("raft_init", raft_init)
+
+        while True:
+            try:
+                self.net.process_msg() or time.sleep(0.001)
+            except KeyboardInterrupt:
+                log("Aborted by interrupt!")
+                break
+            except:
+                log("Error!", traceback.format_exc())
 
 
 RaftNode().main()
