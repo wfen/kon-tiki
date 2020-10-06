@@ -30,12 +30,19 @@ class Net:
 
     def __init__(self):
         """Constructs a new network client."""
-        self.node_id = None
+        self.node_id = None  # Our local node ID
+        self.next_msg_id = 0  # The next message ID we're going to allocate
         self.handlers = {}  # A map of message types to handler functions
         self.callbacks = {}  # A map of message IDs to response handlers
 
     def set_node_id(self, id):
         self.node_id = id
+
+    def new_msg_id(self):
+        """Generate a fresh message ID"""
+        id = self.next_msg_id
+        self.next_msg_id += 1
+        return id
 
     def on(self, msg_type, handler):
         """Register a callback for a message of the given type."""
@@ -59,6 +66,13 @@ class Net:
         """Replies to a given request message with a response body."""
         body["in_reply_to"] = req["body"]["msg_id"]
         self.send(req["src"], body)
+
+    def rpc(self, dest, body, handler):
+        """Sends an RPC request to dest and handles the response with handler."""
+        msg_id = self.new_msg_id()
+        self.callbacks[msg_id] = handler
+        body["msg_id"] = msg_id
+        self.send(dest, body)
 
     def process_msg(self):
         """Handles a message from stdin, if one is currently available."""
@@ -112,15 +126,13 @@ class Log:
         self.entries.extend(entries)
         log("Log:\n" + pformat(self.entries))
 
+    def last(self):
+        """Returns the most recent entry"""
+        return self.entries[-1]
 
-def last(self):
-    """Returns the most recent entry"""
-    return self.entries[-1]
-
-
-def size(self):
-    "How many entries are in the log?"
-    return len(self.entries)
+    def size(self):
+        "How many entries are in the log?"
+        return len(self.entries)
 
 
 class KVStore:
@@ -184,10 +196,66 @@ class RaftNode:
         self.state_machine = KVStore()
         self.setup_handlers()
 
+    def other_nodes(self):
+        """All nodes except this one."""
+        nodes = list(self.node_ids)
+        nodes.remove(self.node_id)
+        return nodes
+
     def set_node_id(self, id):
         """Assign our node ID."""
         self.node_id = id
         self.net.set_node_id(id)
+
+    def brpc(self, body, handler):
+        """Broadcast an RPC message to all other nodes, and call handler with each response."""
+        for node in self.other_nodes():
+            self.net.rpc(node, body, handler)
+
+    def maybe_step_down(self, remote_term):
+        """If remote_term is bigger than ours, advance our term and become a follower."""
+        if self.current_term < remote_term:
+            log(
+                "Stepping down: remote term",
+                remote_term,
+                "higher than our term",
+                self.current_term,
+            )
+            self.advance_term(remote_term)
+            self.become_follower()
+
+    def request_votes(self):
+        """Request that other nodes vote for us as a leader"""
+
+        # We vote for ourself
+        votes = set([self.node_id])
+        term = self.current_term
+
+        def handler(res):
+            body = res["body"]
+            self.maybe_step_down(body["term"])
+
+            if (
+                self.state == "candidate"
+                and self.current_term == term
+                and body["term"] == self.current_term
+                and body["vote_granted"]
+            ):
+                # We have a vote for our candidacy
+                votes.add(res["src"])
+                log("Have votes:", pformat(votes))
+
+        # Broadcast vote request
+        self.brpc(
+            {
+                "type": "request_vote",
+                "term": self.current_term,
+                "candidate_id": self.node_id,
+                "last_log_index": self.log.size(),
+                "last_log_term": self.log.last()["term"],
+            },
+            handler,
+        )
 
     def reset_election_deadline(self):
         """Don't start an election for a little while."""
@@ -216,6 +284,7 @@ class RaftNode:
         self.advance_term(self.current_term + 1)
         self.reset_election_deadline()
         log("Became candidate for term", self.current_term)
+        self.request_votes()
 
     # Actions for followers/candidates
 
