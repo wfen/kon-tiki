@@ -38,7 +38,7 @@ class Net:
     def on(self, msg_type, handler):
         """Register a callback for a message of the given type."""
         if msg_type in self.handlers:
-            raise RuntimeError("already have a handler for message type " + type)
+            raise RuntimeError("already have a handler for message type " + msg_type)
 
         self.handlers[msg_type] = handler
 
@@ -88,6 +88,47 @@ class Net:
         return True
 
 
+class KVStore:
+    def __init__(self):
+        self.state = {}
+
+    def apply(self, op):
+        """Applies an op to the state machine, and returns a response message"""
+        t = op["type"]
+        k = op["key"]
+
+        # Handle state transition
+        if t == "read":
+            if k in self.state:
+                res = {"type": "read_ok", "value": self.state[k]}
+            else:
+                res = {"type": "error", "code": 20, "text": "not found"}
+        elif t == "write":
+            self.state[k] = op["value"]
+            res = {"type": "write_ok"}
+        elif t == "cas":
+            if k not in self.state:
+                res = {"type": "error", "code": 20, "text": "not found"}
+            elif self.state[k] != op["from"]:
+                res = {
+                    "type": "error",
+                    "code": 22,
+                    "text": "expected "
+                    + str(op["from"])
+                    + " but had "
+                    + str(self.state[k]),
+                }
+            else:
+                self.state[k] = op["to"]
+                res = {"type": "cas_ok"}
+
+        log("KV:\n" + pformat(self.state))
+
+        # Construct response
+        res["in_reply_to"] = op["msg_id"]
+        return {"dest": op["client"], "body": res}
+
+
 class RaftNode:
     def __init__(self):
         self.node_id = None  # Our node ID
@@ -95,16 +136,19 @@ class RaftNode:
 
         self.state = "nascent"  # One of nascent, follower, candidate, or leader
 
+        self.state_machine = KVStore()
         self.net = Net()
+        self.setup_handlers()
 
     def set_node_id(self, id):
         """Assign our node ID."""
         self.node_id = id
         self.net.set_node_id(id)
 
-    def main(self):
-        """Entry point"""
-        log("Online.")
+    # Message handlers
+
+    def setup_handlers(self):
+        """Registers message handlers with this node's client"""
 
         # Handle initialization message
         def raft_init(msg):
@@ -115,6 +159,21 @@ class RaftNode:
             self.net.reply(msg, {"type": "raft_init_ok"})
 
         self.net.on("raft_init", raft_init)
+
+        # Handle client KV requests
+        def kv_req(msg):
+            op = msg["body"]
+            op["client"] = msg["src"]
+            res = self.state_machine.apply(op)
+            self.net.send(res["dest"], res["body"])
+
+        self.net.on("read", kv_req)
+        self.net.on("write", kv_req)
+        self.net.on("cas", kv_req)
+
+    def main(self):
+        """Entry point"""
+        log("Online.")
 
         while True:
             try:
