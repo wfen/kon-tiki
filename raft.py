@@ -130,7 +130,7 @@ class Log:
     def append(self, entries):
         """Appends multiple entries to the log."""
         self.entries.extend(entries)
-        log("Log:\n" + pformat(self.entries, width=128))
+        # log("Log:\n" + pformat(self.entries, width=128))
 
     def last(self):
         """Returns the most recent entry"""
