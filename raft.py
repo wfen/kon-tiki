@@ -189,6 +189,8 @@ class RaftNode:
         # Raft state
         self.state = "nascent"  # One of nascent, follower, candidate, or leader
         self.current_term = 0  # Our current Raft term
+        self.voted_for = None  # What node did we vote for in this term?
+        self.leader = None  # Who do we think the leader is?
 
         # Components
         self.net = Net()
@@ -211,6 +213,14 @@ class RaftNode:
         """Broadcast an RPC message to all other nodes, and call handler with each response."""
         for node in self.other_nodes():
             self.net.rpc(node, body, handler)
+
+    def advance_term(self, term):
+        """Advance our term to `term`, resetting who we voted for."""
+        if not self.current_term < term:
+            raise RuntimeError("Can't go backwards")
+
+        self.current_term = term
+        self.voted_for = None
 
     def maybe_step_down(self, remote_term):
         """If remote_term is bigger than ours, advance our term and become a follower."""
@@ -279,11 +289,13 @@ class RaftNode:
         log("Became follower for term", self.current_term)
 
     def become_candidate(self):
-        """Become a candidate"""
+        """Become a candidate, advance our term, and request votes."""
         self.state = "candidate"
         self.advance_term(self.current_term + 1)
+        self.voted_for = self.node_id
+        self.leader = None
+        log("Became candidate for term ", self.current_term)
         self.reset_election_deadline()
-        log("Became candidate for term", self.current_term)
         self.request_votes()
 
     # Actions for followers/candidates
@@ -319,6 +331,59 @@ class RaftNode:
             self.net.reply(msg, {"type": "raft_init_ok"})
 
         self.net.on("raft_init", raft_init)
+
+        # When a node requests our vote...
+        def request_vote(msg):
+            body = msg["body"]
+            self.maybe_step_down(body["term"])
+            grant = False
+
+            if body["term"] < self.current_term:
+                log(
+                    "candidate term",
+                    body["term"],
+                    "lower than",
+                    self.current_term,
+                    "not granting vote",
+                )
+            elif self.voted_for is not None:
+                log("already voted for", self.voted_for, "not granting vote")
+            elif body["last_log_term"] < self.log.last()["term"]:
+                log(
+                    "have log entries from term",
+                    self.log.last()["term"],
+                    "which is newer than remote term",
+                    body["last_log_term"],
+                    "not granting vote",
+                )
+            elif (
+                body["last_log_term"] == self.log.last()["term"]
+                and body["last_log_index"] < self.log.size()
+            ):
+                log(
+                    "Our logs are both at term",
+                    self.log.last()["term"],
+                    "but our log is",
+                    self.log.size(),
+                    "and theirs is only",
+                    body["last_log_index"],
+                )
+            else:
+                log("Granting vote to", msg["src"])
+                grant = True
+                self.voted_for = body["candidate_id"]
+                self.reset_election_deadline()
+
+            self.net.reply(
+                msg,
+                {
+                    "type": "request_vote_res",
+                    "term": self.current_term,
+                    "vote_granted": grant,
+                },
+            )
+
+        self.net.on("request_vote", request_vote)
 
         # Handle client KV requests
         def kv_req(msg):
