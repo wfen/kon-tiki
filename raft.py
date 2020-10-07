@@ -31,6 +31,13 @@ def majority(n):
     return int(math.floor((n / 2.0) + 1))
 
 
+def median(xs):
+    """Given a collection of elements, find the median, biasing towards lower values if there's a tie."""
+    xs = list(xs)
+    xs.sort()
+    return xs[len(xs) - majority(len(xs))]
+
+
 class Net:
     """Handles console IO for sending and receiving messages."""
 
@@ -372,6 +379,15 @@ class RaftNode:
             self.become_follower()
             return True
 
+    def advance_commit_index(self):
+        """If we're the leader, advance our commit index based on what other nodes match us."""
+        if self.state == "leader":
+            n = median(self.match_index().values())
+            if self.commit_index < n and self.log.get(n)["term"] == self.current_term:
+                log("Commit index now", n)
+                self.commit_index = n
+                return True
+
     def replicate_log(self):
         """If we're the leader, replicate unacknowledged log entries to followers. Also serves as a heartbeat."""
 
@@ -588,7 +604,7 @@ class RaftNode:
 
         while True:
             try:
-                self.net.process_msg() or self.step_down_on_timeout() or self.replicate_log() or self.election() or time.sleep(
+                self.net.process_msg() or self.step_down_on_timeout() or self.replicate_log() or self.election() or self.advance_commit_index() or time.sleep(
                     0.001
                 )
             except KeyboardInterrupt:
