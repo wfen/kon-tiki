@@ -1,15 +1,15 @@
 #!/usr/bin/env python
 
 from __future__ import unicode_literals
-import sys
-import json
-from pprint import pformat
 import datetime
+import json
+import math
+from pprint import pformat
+import random
+import sys
 import select
 import time
 import traceback
-import random
-import math
 
 # Utilities
 
@@ -43,10 +43,10 @@ class Net:
 
     def __init__(self):
         """Constructs a new network client."""
-        self.node_id = None  # Our local node ID
-        self.next_msg_id = 0  # The next message ID we're going to allocate
-        self.handlers = {}  # A map of message types to handler functions
-        self.callbacks = {}  # A map of message IDs to response handlers
+        self.node_id = None     # Our local node ID
+        self.next_msg_id = 0    # The next message ID we're going to allocate
+        self.handlers = {}      # A map of message types to handler functions
+        self.callbacks = {}     # A map of message IDs to response handlers
 
     def set_node_id(self, id):
         self.node_id = id
@@ -90,8 +90,8 @@ class Net:
     def process_msg(self):
         """Handles a message from stdin, if one is currently available."""
 
-        # If we don't have any stdin, we'll return None, and if we do get
-        # a message and process it, we'll return True.
+        # If we don't have anything to receive from stdin, we'll return None,
+        # and if we do get a message and process it, we'll return True.
         if sys.stdin not in select.select([sys.stdin], [], [], 0)[0]:
             return None
 
@@ -143,6 +143,14 @@ class Log:
         """Returns the most recent entry"""
         return self.entries[-1]
 
+    def last_term(self):
+        """What's the term of the last entry in the log?"""
+        l = self.last()
+        if l:
+            return l['term']
+        else:
+            return 0
+
     def size(self):
         "How many entries are in the log?"
         return len(self.entries)
@@ -152,13 +160,14 @@ class Log:
         self.entries = self.entries[0:size]
 
     def from_index(self, i):
-        "All entries from index i on"
+        """All entries from index i on"""
         if i <= 0:
             raise LookupError("illegal index " + i)
-        return self.entries[i - 1 :]
+        return self.entries[i - 1:]
 
 
 class KVStore:
+    """A state machine providing a key-value store."""
     def __init__(self):
         self.state = {}
 
@@ -183,11 +192,8 @@ class KVStore:
                 res = {
                     "type": "error",
                     "code": 22,
-                    "text": "expected "
-                    + str(op["from"])
-                    + " but had "
-                    + str(self.state[k]),
-                }
+                    "text": "expected " + str(op["from"]) + " but had " + str(self.state[k]),
+                    }
             else:
                 self.state[k] = op["to"]
                 res = {"type": "cas_ok"}
@@ -202,29 +208,29 @@ class KVStore:
 class RaftNode:
     def __init__(self):
         # Heartbeats & timeouts
-        self.election_timeout = 2  # Time before election, in seconds
-        self.election_deadline = 0  # Next election, in epoch seconds
+        self.election_timeout = 2       # Time before election, in seconds
+        self.election_deadline = 0      # Next election, in epoch seconds
         self.min_replication_interval = 0.05  # Don't replicate TOO frequently
-        self.election_deadline = 0  # Next election, in epoch seconds
-        self.step_down_deadline = 0  # When to step down automatically
-        self.last_replication = 0  # Last replication, in epoch seconds
+        self.election_deadline = 0      # Next election, in epoch seconds
+        self.step_down_deadline = 0     # When to step down automatically
+        self.last_replication = 0       # Last replication, in epoch seconds
 
         # Node & cluster IDS
-        self.node_id = None  # Our node ID
-        self.node_ids = None  # The set of node IDs
+        self.node_id = None       # Our node ID
+        self.node_ids = None      # The set of node IDs
 
         # Raft state
-        self.state = "nascent"  # One of nascent, follower, candidate, or leader
-        self.current_term = 0  # Our current Raft term
-        self.voted_for = None  # What node did we vote for in this term?
-        self.commit_index = 0  # The highest committed entry in the log
-        self.last_applied = 1  # The last entry we applied to the state machine
-        self.leader = None  # Who do we think the leader is?
+        self.state = "nascent"    # One of nascent, follower, candidate, or leader
+        self.current_term = 0     # Our current Raft term
+        self.voted_for = None     # What node did we vote for in this term?
+        self.commit_index = 0     # The highest committed entry in the log
+        self.last_applied = 1     # The last entry we applied to the state machine
+        self.leader = None        # Who do we think the leader is?
 
         # Leader state
-        self.next_index = None  # A map of nodes to the next index to replicate
+        self.next_index = None    # A map of nodes to the next index to replicate
         self._match_index = None  # Map of nodes to the highest log entry known
-        #                           to be replicated on that node.
+                                  # to be replicated on that node.
 
         # Components
         self.net = Net()
@@ -256,9 +262,7 @@ class RaftNode:
 
     def reset_election_deadline(self):
         """Don't start an election for a little while."""
-        self.election_deadline = time.time() + (
-            self.election_timeout * (random.random() + 1)
-        )
+        self.election_deadline = time.time() + (self.election_timeout * (random.random() + 1))
 
     def reset_step_down_deadline(self):
         """Don't step down for a while."""
@@ -275,12 +279,7 @@ class RaftNode:
     def maybe_step_down(self, remote_term):
         """If remote_term is bigger than ours, advance our term and become a follower."""
         if self.current_term < remote_term:
-            log(
-                "Stepping down: remote term",
-                remote_term,
-                "higher than our term",
-                self.current_term,
-            )
+            log("Stepping down: remote term", remote_term, "higher than our term", self.current_term)
             self.advance_term(remote_term)
             self.become_follower()
 
@@ -296,12 +295,11 @@ class RaftNode:
             body = res["body"]
             self.maybe_step_down(body["term"])
 
-            if (
-                self.state == "candidate"
-                and self.current_term == term
-                and body["term"] == self.current_term
-                and body["vote_granted"]
-            ):
+            if self.state == "candidate" \
+                and self.current_term == term \
+                and body["term"] == self.current_term \
+                and body["vote_granted"]:
+
                 # We have a vote for our candidacy
                 votes.add(res["src"])
                 log("Have votes:", pformat(votes, width=128))
@@ -311,16 +309,14 @@ class RaftNode:
                     self.become_leader()
 
         # Broadcast vote request
-        self.brpc(
-            {
-                "type": "request_vote",
-                "term": self.current_term,
-                "candidate_id": self.node_id,
-                "last_log_index": self.log.size(),
-                "last_log_term": self.log.last()["term"],
+        self.brpc({
+            "type": "request_vote",
+            "term": self.current_term,
+            "candidate_id": self.node_id,
+            "last_log_index": self.log.size(),
+            "last_log_term": self.log.last()["term"],
             },
-            handle,
-        )
+            handle)
 
     # Role transitions
 
@@ -434,30 +430,24 @@ class RaftNode:
                         if self.state == "leader" and term == self.current_term:
                             self.reset_step_down_deadline()
                             if body["success"]:
-                                self.next_index[_node] = max(
-                                    self.next_index[_node], _ni + len(_entries)
-                                )
-                                self._match_index[_node] = max(
-                                    self._match_index[_node], _ni - 1 + len(_entries)
-                                )
+                                self.next_index[_node] = \
+                                    max(self.next_index[_node], _ni + len(_entries))
+                                self._match_index[_node] = \
+                                    max(self._match_index[_node], _ni - 1 + len(_entries))
                                 log("node", _node, "# entries", len(_entries), "ni", ni)
                                 log("next index:", pformat(self.next_index))
                             else:
                                 self.next_index[_node] -= 1
 
-                    self.net.rpc(
-                        node,
-                        {
-                            "type": "append_entries",
-                            "term": self.current_term,
-                            "leader_id": self.node_id,
-                            "prev_log_index": ni - 1,
-                            "prev_log_term": self.log.get(ni - 1)["term"],
-                            "entries": entries,
-                            "leader_commit": self.commit_index,
-                        },
-                        handler,
-                    )
+                    self.net.rpc(node, {
+                        "type": "append_entries",
+                        "term": self.current_term,
+                        "leader_id": self.node_id,
+                        "prev_log_index": ni - 1,
+                        "prev_log_term": self.log.get(ni - 1)["term"],
+                        "entries": entries,
+                        "leader_commit": self.commit_index,
+                        }, handler)
                     replicated = True
 
         if replicated:
@@ -493,49 +483,31 @@ class RaftNode:
             grant = False
 
             if body["term"] < self.current_term:
-                log(
-                    "candidate term",
-                    body["term"],
-                    "lower than",
-                    self.current_term,
-                    "not granting vote",
-                )
+                log("candidate term", body["term"], "lower than",
+                    self.current_term, "not granting vote")
             elif self.voted_for is not None:
                 log("already voted for", self.voted_for, "not granting vote")
             elif body["last_log_term"] < self.log.last()["term"]:
-                log(
-                    "have log entries from term",
-                    self.log.last()["term"],
+                log("have log entries from term", self.log.last()["term"],
                     "which is newer than remote term",
-                    body["last_log_term"],
-                    "not granting vote",
+                    body["last_log_term"], "not granting vote",
                 )
-            elif (
-                body["last_log_term"] == self.log.last()["term"]
-                and body["last_log_index"] < self.log.size()
-            ):
-                log(
-                    "Our logs are both at term",
-                    self.log.last()["term"],
-                    "but our log is",
-                    self.log.size(),
-                    "and theirs is only",
-                    body["last_log_index"],
-                )
+            elif body["last_log_term"] == self.log.last()["term"] \
+                and body["last_log_index"] < self.log.size():
+                log("Our logs are both at term", self.log.last()["term"],
+                    "but our log is", self.log.size(),
+                    "and theirs is only", body["last_log_index"])
             else:
                 log("Granting vote to", msg["src"])
                 grant = True
                 self.voted_for = body["candidate_id"]
                 self.reset_election_deadline()
 
-            self.net.reply(
-                msg,
-                {
-                    "type": "request_vote_res",
-                    "term": self.current_term,
-                    "vote_granted": grant,
-                },
-            )
+            self.net.reply(msg, {
+                "type": "request_vote_res",
+                "term": self.current_term,
+                "vote_granted": grant,
+                })
 
         self.net.on("request_vote", request_vote)
 
@@ -548,7 +520,7 @@ class RaftNode:
                 "type": "append_entries_res",
                 "term": self.current_term,
                 "success": False,
-            }
+                }
 
             if body["term"] < self.current_term:
                 # Leader is behind us
@@ -562,9 +534,8 @@ class RaftNode:
 
             # Check previous entry to see if it matches
             if body["prev_log_index"] <= 0:
-                raise RuntimeError(
-                    "Out of bounds previous log index" + str(body["prev_log_index"])
-                )
+                raise RuntimeError("Out of bounds previous log index" + \
+                        str(body["prev_log_index"]))
 
             try:
                 e = self.log.get(body["prev_log_index"])
@@ -582,10 +553,7 @@ class RaftNode:
 
             # Advance commit pointer
             if self.commit_index < body["leader_commit"]:
-                self.commit_index = min(
-                    body["leader_commit"],
-                    self.log.size(),
-                )
+                self.commit_index = min(body["leader_commit"], self.log.size())
 
             # Acknowledge
             res["success"] = True
@@ -596,6 +564,7 @@ class RaftNode:
         # Handle client KV requests
         def kv_req(msg):
             if self.state == "leader":
+                # Record who we should tell about the completion of this op
                 op = msg["body"]
                 op["client"] = msg["src"]
                 self.log.append([{"term": self.current_term, "op": op}])
@@ -604,9 +573,11 @@ class RaftNode:
                 msg["dest"] = self.leader
                 self.net.send_msg(msg)
             else:
-                self.net.reply(
-                    msg, {"type": "error", "code": 11, "text": "not a leader"}
-                )
+                self.net.reply(msg, {
+                    "type": "error",
+                    "code": 11,
+                    "text": "not a leader"
+                    })
 
         self.net.on("read", kv_req)
         self.net.on("write", kv_req)
@@ -618,9 +589,14 @@ class RaftNode:
 
         while True:
             try:
-                self.net.process_msg() or self.step_down_on_timeout() or self.replicate_log() or self.election() or self.advance_commit_index() or self.advance_state_machine() or time.sleep(
-                    0.001
-                )
+                self.net.process_msg() \
+                    or self.step_down_on_timeout() \
+                    or self.replicate_log() \
+                    or self.election() \
+                    or self.advance_commit_index() \
+                    or self.advance_state_machine() \
+                    or time.sleep(0.001)
+
             except KeyboardInterrupt:
                 log("Aborted by interrupt!")
                 break
