@@ -187,6 +187,7 @@ class RaftNode:
         # Heartbeats & timeouts
         self.election_timeout = 2  # Time before election, in seconds
         self.election_deadline = 0  # Next election, in epoch seconds
+        self.step_down_deadline = 0  # When to step down automatically
 
         # Node & cluster IDS
         self.node_id = None  # Our node ID
@@ -247,7 +248,8 @@ class RaftNode:
         votes = set([self.node_id])
         term = self.current_term
 
-        def handler(res):
+        def handle(res):
+            self.reset_step_down_deadline()
             body = res["body"]
             self.maybe_step_down(body["term"])
 
@@ -274,7 +276,7 @@ class RaftNode:
                 "last_log_index": self.log.size(),
                 "last_log_term": self.log.last()["term"],
             },
-            handler,
+            handle,
         )
 
     def reset_election_deadline(self):
@@ -282,6 +284,10 @@ class RaftNode:
         self.election_deadline = time.time() + (
             self.election_timeout * (random.random() + 1)
         )
+
+    def reset_step_down_deadline(self):
+        """Don't step down for a while."""
+        self.step_down_deadline = time.time() + self.election_timeout
 
     def advance_term(self, term):
         """Advance our term to `term`, resetting who we voted for."""
@@ -304,6 +310,7 @@ class RaftNode:
         self.advance_term(self.current_term + 1)
         self.voted_for = self.node_id
         self.leader = None
+        self.reset_step_down_deadline()
         log("Became candidate for term ", self.current_term)
         self.reset_election_deadline()
         self.request_votes()
@@ -314,6 +321,7 @@ class RaftNode:
             raise RuntimeError("Should be a candidate")
 
         self.state = "leader"
+        self.reset_step_down_deadline()
         log("Became a leader for term", self.current_term)
 
     # Actions for followers/candidates
@@ -327,6 +335,14 @@ class RaftNode:
             else:
                 # We're a leader, or initializing; sleep again
                 self.reset_election_deadline()
+            return True
+
+    # Actions for leaders
+    def step_down_on_timeout(self):
+        """If we haven't received any acks for a while, step down."""
+        if self.state == "leader" and self.step_down_deadline < time.time():
+            log("Stepping down: haven't received any acks recently")
+            self.become_follower()
             return True
 
     # Message handlers
@@ -420,7 +436,9 @@ class RaftNode:
 
         while True:
             try:
-                self.net.process_msg() or self.election() or time.sleep(0.001)
+                self.net.process_msg() or self.step_down_on_timeout() or self.election() or time.sleep(
+                    0.001
+                )
             except KeyboardInterrupt:
                 log("Aborted by interrupt!")
                 break
