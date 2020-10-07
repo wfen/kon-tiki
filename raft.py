@@ -218,6 +218,7 @@ class RaftNode:
         self.current_term = 0  # Our current Raft term
         self.voted_for = None  # What node did we vote for in this term?
         self.commit_index = 0  # The highest committed entry in the log
+        self.last_applied = 1  # The last entry we applied to the state machine
         self.leader = None  # Who do we think the leader is?
 
         # Leader state
@@ -356,6 +357,21 @@ class RaftNode:
         self._match_index = {n: 0 for n in self.other_nodes()}
         self.reset_step_down_deadline()
         log("Became leader for term", self.current_term)
+
+    # Actions for all  nodes
+
+    def advance_state_machine(self):
+        """If we have unapplied committed entries in the log, apply one to the state machine."""
+        if self.last_applied < self.commit_index:
+            # Advance the applied index and apply that op
+            self.last_applied += 1
+            res = self.state_machine.apply(self.log.get(self.last_applied)["op"])
+            if self.state == "leader":
+                # We were the leader, let's respond to the client.
+                self.net.send(res["dest"], res["body"])
+
+        # We did something!
+        return True
 
     # Actions for followers/candidates
 
@@ -583,8 +599,6 @@ class RaftNode:
                 op = msg["body"]
                 op["client"] = msg["src"]
                 self.log.append([{"term": self.current_term, "op": op}])
-                res = self.state_machine.apply(op)
-                self.net.send(res["dest"], res["body"])
             elif self.leader:
                 # We're not the leader, but we can proxy to one
                 msg["dest"] = self.leader
@@ -599,12 +613,12 @@ class RaftNode:
         self.net.on("cas", kv_req)
 
     def main(self):
-        """Entry point"""
+        """Mainloop"""
         log("Online.")
 
         while True:
             try:
-                self.net.process_msg() or self.step_down_on_timeout() or self.replicate_log() or self.election() or self.advance_commit_index() or time.sleep(
+                self.net.process_msg() or self.step_down_on_timeout() or self.replicate_log() or self.election() or self.advance_commit_index() or self.advance_state_machine() or time.sleep(
                     0.001
                 )
             except KeyboardInterrupt:
