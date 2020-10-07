@@ -321,6 +321,7 @@ class RaftNode:
         self.state = "follower"
         self.next_index = None
         self._match_index = None
+        self.leader = None
         self.reset_election_deadline()
         log("Became follower for term", self.current_term)
 
@@ -341,6 +342,7 @@ class RaftNode:
             raise RuntimeError("Should be a candidate")
 
         self.state = "leader"
+        self.leader = None
         self.last_replication = 0  # Start replicating immediately
         # We'll start by trying to replicate our most recent entry
         self.next_index = {n: self.log.size() + 1 for n in self.other_nodes()}
@@ -521,6 +523,9 @@ class RaftNode:
                 self.net.reply(msg, res)
                 return None
 
+            # This leader is valid; remember them and don't try to run our own
+            # election for a bit
+            self.leader = body["leader_id"]
             self.reset_election_deadline()
 
             # Check previous entry to see if it matches
@@ -564,6 +569,10 @@ class RaftNode:
                 self.log.append([{"term": self.current_term, "op": op}])
                 res = self.state_machine.apply(op)
                 self.net.send(res["dest"], res["body"])
+            elif self.leader:
+                # We're not the leader, but we can proxy to one
+                msg["dest"] = self.leader
+                self.net.send_msg(msg)
             else:
                 self.net.reply(
                     msg, {"type": "error", "code": 11, "text": "not a leader"}
