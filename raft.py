@@ -140,6 +140,10 @@ class Log:
         "How many entries are in the log?"
         return len(self.entries)
 
+    def truncate(self, size):
+        """Truncate the log to this many entries."""
+        self.entries = self.entries[0:size]
+
     def from_index(self, i):
         "All entries from index i on"
         if i <= 0:
@@ -242,6 +246,16 @@ class RaftNode:
         for node in self.other_nodes():
             self.net.rpc(node, body, handler)
 
+    def reset_election_deadline(self):
+        """Don't start an election for a little while."""
+        self.election_deadline = time.time() + (
+            self.election_timeout * (random.random() + 1)
+        )
+
+    def reset_step_down_deadline(self):
+        """Don't step down for a while."""
+        self.step_down_deadline = time.time() + self.election_timeout
+
     def advance_term(self, term):
         """Advance our term to `term`, resetting who we voted for."""
         if not self.current_term < term:
@@ -300,23 +314,6 @@ class RaftNode:
             handle,
         )
 
-    def reset_election_deadline(self):
-        """Don't start an election for a little while."""
-        self.election_deadline = time.time() + (
-            self.election_timeout * (random.random() + 1)
-        )
-
-    def reset_step_down_deadline(self):
-        """Don't step down for a while."""
-        self.step_down_deadline = time.time() + self.election_timeout
-
-    def advance_term(self, term):
-        """Advance our term to `term`, resetting who we voted for."""
-        if not self.current_term < term:
-            raise RuntimeError("Can't go backwards")
-
-        self.current_term = term
-
     # Role transitions
 
     def become_follower(self):
@@ -349,7 +346,7 @@ class RaftNode:
         self.next_index = {n: self.log.size() + 1 for n in self.other_nodes()}
         self._match_index = {n: 0 for n in self.other_nodes()}
         self.reset_step_down_deadline()
-        log("Became a leader for term", self.current_term)
+        log("Became leader for term", self.current_term)
 
     # Actions for followers/candidates
 
@@ -365,6 +362,7 @@ class RaftNode:
             return True
 
     # Actions for leaders
+
     def step_down_on_timeout(self):
         """If we haven't received any acks for a while, step down."""
         if self.state == "leader" and self.step_down_deadline < time.time():
@@ -506,6 +504,57 @@ class RaftNode:
             )
 
         self.net.on("request_vote", request_vote)
+
+        # When we're given entries by a leader
+        def append_entries(msg):
+            body = msg["body"]
+            self.maybe_step_down(body["term"])
+
+            res = {
+                "type": "append_entries_res",
+                "term": self.current_term,
+                "success": False,
+            }
+
+            if body["term"] < self.current_term:
+                # Leader is behind us
+                self.net.reply(msg, res)
+                return None
+
+            self.reset_election_deadline()
+
+            # Check previous entry to see if it matches
+            if body["prev_log_index"] <= 0:
+                raise RuntimeError(
+                    "Out of bounds previous log index" + str(body["prev_log_index"])
+                )
+
+            try:
+                e = self.log.get(body["prev_log_index"])
+            except IndexError:
+                e = None
+
+            if (not e) or e["term"] != body["prev_log_term"]:
+                # We disagree on the previous term
+                self.net.reply(msg, res)
+                return None
+
+            # We agree on the previous log term; truncate and append
+            self.log.truncate(body["prev_log_index"])
+            self.log.append(body["entries"])
+
+            # Advance commit pointer
+            if self.commit_index < body["leader_commit"]:
+                self.commit_index = min(
+                    body["leader_commit"],
+                    self.log.size(),
+                )
+
+            # Acknowledge
+            res["success"] = True
+            self.net.reply(msg, res)
+
+        self.net.on("append_entries", append_entries)
 
         # Handle client KV requests
         def kv_req(msg):
