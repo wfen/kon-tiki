@@ -9,6 +9,7 @@ import select
 import time
 import traceback
 import random
+import math
 
 # Utilities
 
@@ -23,6 +24,11 @@ def log(*args):
             sys.stderr.write(" ")
     sys.stderr.write("\n")
     sys.stderr.flush()
+
+
+def majority(n):
+    """What number would constitute a majority of n nodes?"""
+    return int(math.floor((n / 2.0) + 1))
 
 
 class Net:
@@ -255,6 +261,10 @@ class RaftNode:
                 votes.add(res["src"])
                 log("Have votes:", pformat(votes))
 
+                if majority(len(self.node_ids)) <= len(votes):
+                    # We have a majority of votes from this term
+                    self.become_leader()
+
         # Broadcast vote request
         self.brpc(
             {
@@ -297,6 +307,14 @@ class RaftNode:
         log("Became candidate for term ", self.current_term)
         self.reset_election_deadline()
         self.request_votes()
+
+    def become_leader(self):
+        """Become a leader"""
+        if not self.state == "candidate":
+            raise RuntimeError("Should be a candidate")
+
+        self.state = "leader"
+        log("Became a leader for term", self.current_term)
 
     # Actions for followers/candidates
 
