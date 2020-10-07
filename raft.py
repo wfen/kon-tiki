@@ -59,7 +59,7 @@ class Net:
 
     def send_msg(self, msg):
         """Sends a raw message object"""
-        log("Sent\n" + pformat(msg))
+        log("Sent\n" + pformat(msg, width=128))
         json.dump(msg, sys.stdout)
         sys.stdout.write("\n")
         sys.stdout.flush()
@@ -93,7 +93,7 @@ class Net:
             return None
 
         msg = json.loads(line)
-        log("Received\n" + pformat(msg))
+        log("Received\n" + pformat(msg, width=128))
         body = msg["body"]
 
         handler = None
@@ -108,7 +108,7 @@ class Net:
             handler = self.handlers[body["type"]]
 
         else:
-            raise RuntimeError("No callback or handler for\n" + pformat(msg))
+            raise RuntimeError("No callback or handler for\n" + pformat(msg, width=128))
 
         handler(msg)
         return True
@@ -130,7 +130,7 @@ class Log:
     def append(self, entries):
         """Appends multiple entries to the log."""
         self.entries.extend(entries)
-        log("Log:\n" + pformat(self.entries))
+        log("Log:\n" + pformat(self.entries, width=128))
 
     def last(self):
         """Returns the most recent entry"""
@@ -139,6 +139,12 @@ class Log:
     def size(self):
         "How many entries are in the log?"
         return len(self.entries)
+
+    def from_index(self, i):
+        "All entries from index i on"
+        if i <= 0:
+            raise LookupError("illegal index " + i)
+        return self.entries[i - 1 :]
 
 
 class KVStore:
@@ -175,7 +181,7 @@ class KVStore:
                 self.state[k] = op["to"]
                 res = {"type": "cas_ok"}
 
-        log("KV:\n" + pformat(self.state))
+        log("KV:\n" + pformat(self.state, width=128))
 
         # Construct response
         res["in_reply_to"] = op["msg_id"]
@@ -187,7 +193,10 @@ class RaftNode:
         # Heartbeats & timeouts
         self.election_timeout = 2  # Time before election, in seconds
         self.election_deadline = 0  # Next election, in epoch seconds
+        self.min_replication_interval = 0.05  # Don't replicate TOO frequently
+        self.election_deadline = 0  # Next election, in epoch seconds
         self.step_down_deadline = 0  # When to step down automatically
+        self.last_replication = 0  # Last replication, in epoch seconds
 
         # Node & cluster IDS
         self.node_id = None  # Our node ID
@@ -197,7 +206,13 @@ class RaftNode:
         self.state = "nascent"  # One of nascent, follower, candidate, or leader
         self.current_term = 0  # Our current Raft term
         self.voted_for = None  # What node did we vote for in this term?
+        self.commit_index = 0  # The highest committed entry in the log
         self.leader = None  # Who do we think the leader is?
+
+        # Leader state
+        self.next_index = None  # A map of nodes to the next index to replicate
+        self._match_index = None  # Map of nodes to the highest log entry known
+        #                           to be replicated on that node.
 
         # Components
         self.net = Net()
@@ -210,6 +225,12 @@ class RaftNode:
         nodes = list(self.node_ids)
         nodes.remove(self.node_id)
         return nodes
+
+    def match_index(self):
+        """Returns the map of match indices, including an entry for ourselves, based on our log size."""
+        m = dict(self._match_index)
+        m[self.node_id] = self.log.size()
+        return m
 
     def set_node_id(self, id):
         """Assign our node ID."""
@@ -261,7 +282,7 @@ class RaftNode:
             ):
                 # We have a vote for our candidacy
                 votes.add(res["src"])
-                log("Have votes:", pformat(votes))
+                log("Have votes:", pformat(votes, width=128))
 
                 if majority(len(self.node_ids)) <= len(votes):
                     # We have a majority of votes from this term
@@ -301,6 +322,8 @@ class RaftNode:
     def become_follower(self):
         """Become a follower"""
         self.state = "follower"
+        self.next_index = None
+        self._match_index = None
         self.reset_election_deadline()
         log("Became follower for term", self.current_term)
 
@@ -321,6 +344,10 @@ class RaftNode:
             raise RuntimeError("Should be a candidate")
 
         self.state = "leader"
+        self.last_replication = 0  # Start replicating immediately
+        # We'll start by trying to replicate our most recent entry
+        self.next_index = {n: self.log.size() + 1 for n in self.other_nodes()}
+        self._match_index = {n: 0 for n in self.other_nodes()}
         self.reset_step_down_deadline()
         log("Became a leader for term", self.current_term)
 
@@ -343,6 +370,67 @@ class RaftNode:
         if self.state == "leader" and self.step_down_deadline < time.time():
             log("Stepping down: haven't received any acks recently")
             self.become_follower()
+            return True
+
+    def replicate_log(self):
+        """If we're the leader, replicate unacknowledged log entries to followers. Also serves as a heartbeat."""
+
+        # How long has it been since we replicated?
+        elapsed_time = time.time() - self.last_replication
+        # We'll set this to true if we replicate to anyone
+        replicated = False
+        # We'll need this to make sure we process responses in *this* term
+        term = self.current_term
+
+        if self.state == "leader" and self.min_replication_interval < elapsed_time:
+            # We're a leader, and enough time elapsed
+            for node in self.other_nodes():
+                # What entries should we send this node?
+                ni = self.next_index[node]
+                entries = self.log.from_index(ni)
+                if 0 < len(entries) or self.heartbeat_interval < elapsed_time:
+                    log("replicating " + str(ni) + "+ to", node)
+
+                    # "closure"
+                    _ni = ni
+                    _entries = list(entries)
+                    _node = node
+
+                    def handler(res):
+                        body = res["body"]
+                        self.maybe_step_down(body["term"])
+                        if self.state == "leader" and term == self.current_term:
+                            self.reset_step_down_deadline()
+                            if body["success"]:
+                                self.next_index[_node] = max(
+                                    self.next_index[_node], _ni + len(_entries)
+                                )
+                                self._match_index[_node] = max(
+                                    self._match_index[_node], _ni - 1 + len(_entries)
+                                )
+                                log("node", _node, "# entries", len(_entries), "ni", ni)
+                                log("next index:", pformat(self.next_index))
+                            else:
+                                self.next_index[_node] -= 1
+
+                    self.net.rpc(
+                        node,
+                        {
+                            "type": "append_entries",
+                            "term": self.current_term,
+                            "leader_id": self.node_id,
+                            "prev_log_index": ni - 1,
+                            "prev_log_term": self.log.get(ni - 1)["term"],
+                            "entries": entries,
+                            "leader_commit": self.commit_index,
+                        },
+                        handler,
+                    )
+                    replicated = True
+
+        if replicated:
+            # We did something!
+            self.last_replication = time.time()
             return True
 
     # Message handlers
@@ -421,10 +509,16 @@ class RaftNode:
 
         # Handle client KV requests
         def kv_req(msg):
-            op = msg["body"]
-            op["client"] = msg["src"]
-            res = self.state_machine.apply(op)
-            self.net.send(res["dest"], res["body"])
+            if self.state == "leader":
+                op = msg["body"]
+                op["client"] = msg["src"]
+                self.log.append([{"term": self.current_term, "op": op}])
+                res = self.state_machine.apply(op)
+                self.net.send(res["dest"], res["body"])
+            else:
+                self.net.reply(
+                    msg, {"type": "error", "code": 11, "text": "not a leader"}
+                )
 
         self.net.on("read", kv_req)
         self.net.on("write", kv_req)
@@ -436,7 +530,7 @@ class RaftNode:
 
         while True:
             try:
-                self.net.process_msg() or self.step_down_on_timeout() or self.election() or time.sleep(
+                self.net.process_msg() or self.step_down_on_timeout() or self.replicate_log() or self.election() or time.sleep(
                     0.001
                 )
             except KeyboardInterrupt:
